@@ -1,0 +1,194 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+## Imports
+
+```{r}
+library(quantmod)
+library(xts)
+library(rumidas)
+library(xts)
+library(rugarch)
+```
+
+## Read datasets
+
+### Google data
+
+```{r}
+google_data <- read.csv("google_data.csv", header = TRUE, stringsAsFactors = FALSE)
+```
+
+### Vestas stock price data
+
+```{r}
+symbol <- "VWS.CO"  # Vestas Wind Systems (Copenhagen Stock Exchange)
+start_date <- as.Date("2010-01-01")
+end_date <- as.Date("2022-08-31")
+getSymbols(symbol, src = "yahoo", from = start_date, to = end_date)
+vestas_data <- Cl(get(symbol))  # Cl() extracts the closing prices
+vestas_df <- data.frame(date = index(vestas_data), price = coredata(vestas_data))
+```
+
+## Clean and prepare the data
+
+### Google data
+
+```{r}
+# Select only the relevant columns
+google_data <- google_data[, c("country", "countryISO", "techSector", "year", "value")]
+
+# Define the sectors you're interested in
+tech_sectors <- c("Batteries", "Electric vehicle", "Electricity", "Electrification", 
+                  "Geothermal", "Heat pump", "Hydroelectricity", "Hydrogen", 
+                  "Nuclear", "Offshore wind", "Solar power", "Train", "Wind power")
+
+# Filter for the selected tech sectors
+google_data <- google_data[google_data$techSector %in% tech_sectors, ]
+
+colnames(google_data)[colnames(google_data) == "year"] <- "date"
+
+# Convert the date column into a proper date format
+google_data$date <- as.Date(paste0(substr(google_data$date, 1, 2), 
+                                   "-", substr(google_data$date, 3, 4), 
+                                   "-01"), 
+                            format = "%y-%m-%d")
+# Convert back to Date type
+google_data$date <- as.Date(google_data$date)
+
+# Aggregate: Compute average value for each month
+google_monthly_avg <- aggregate(value ~ date, data = google_data, FUN = mean)
+```
+
+```{r}
+head(google_monthly_avg)
+```
+
+```{r}
+# Plot the monthly average values
+plot(google_monthly_avg$date, google_monthly_avg$value, type = "l", col = "blue",
+     xlab = "Year", ylab = "Average Value", main = "Monthly Average of Renewable Energy Trends")
+
+# Add grid for better readability
+grid()
+```
+
+### Vestas stock price data
+
+```{r}
+# Rename the column for easier access
+colnames(vestas_df)[2] <- "price"
+vestas_df$date <- as.Date(vestas_df$date)
+```
+
+```{r}
+vestas_df
+```
+
+```{r}
+# Plot Vestas stock price over time
+plot(vestas_df$date, vestas_df$price, type = "l", col = "red",
+     xlab = "Year", ylab = "Stock Price (DKK)", 
+     main = "Vestas Stock Price (2010 - 2022)")
+# Add grid for better readability
+grid()
+```
+
+```{r}
+# Calculate the log returns (difference of log prices)
+vestas_daily_returns <- diff(log(vestas_df$price))
+
+# Create a new data frame with the corresponding dates and returns
+vestas_returns_df <- data.frame(date = vestas_df$date[-1], log_return = vestas_daily_returns)
+
+# View the data frame
+head(vestas_returns_df)
+
+# Plot the log returns over time
+plot(vestas_returns_df$date, vestas_returns_df$log_return, type = "l", col = "red", 
+     xlab = "Date", ylab = "Log Return", 
+     main = "Vestas Daily Log Returns (2010 - 2022)")
+
+# Add grid for better readability
+grid()
+
+
+```
+
+## Transfrom data to xts
+
+### Google data
+
+```{r}
+google_monthly_avg_xts <- xts(google_monthly_avg$value, order.by = google_monthly_avg$date)
+colnames(google_monthly_avg_xts) <- "value"
+head(google_monthly_avg_xts)
+
+```
+
+### Vestas log return data
+
+```{r}
+vestas_daily_returns_xts <- xts(vestas_returns_df$log_return, order.by = vestas_returns_df$date)
+colnames(vestas_daily_returns_xts) <- "return"
+head(vestas_daily_returns_xts)
+```
+
+## Garch-Midas
+
+### Alignment of dates 
+
+```{r}
+K_value <- 8
+
+# Identify the starting date of the monthly data
+start_monthly <- index(google_monthly_avg_xts)[1]
+
+# Add K months to the starting date
+new_start_date <- as.Date(seq(start_monthly, by = "month", length.out = K_value + 1)[K_value + 1])
+
+# Adjust the daily data to start from the new date only if needed
+if (index(vestas_daily_returns_xts)[1] < new_start_date) {
+  vestas_daily_returns_xts <- vestas_daily_returns_xts[new_start_date <= index(vestas_daily_returns_xts)]
+}
+
+# Ensure the end date of daily data doesn't exceed the end date of monthly data
+end_monthly <- index(google_monthly_avg_xts)[length(google_monthly_avg_xts)]
+if (index(vestas_daily_returns_xts)[length(vestas_daily_returns_xts)] > end_monthly) {
+  vestas_daily_returns_xts <- vestas_daily_returns_xts[index(vestas_daily_returns_xts) <= end_monthly]
+}
+
+head(vestas_daily_returns_xts)
+tail(vestas_daily_returns_xts)
+
+head(google_monthly_avg_xts)
+tail(google_monthly_avg_xts)
+```
+
+## Fitting the model
+
+```{r}
+dist_GM <- "std"
+chosen_weighting_function <- "Beta"
+
+mv_m <- mv_into_mat(x = vestas_daily_returns_xts$return , mv = google_monthly_avg_xts, K = K_value, type = "monthly")
+
+GM <- ugmfit(
+    model = "GM",
+    skew = "NO",
+    distribution = dist_GM,
+    daily_ret = vestas_daily_returns_xts$return ,
+    mv_m = mv_m,
+    K = K_value, 
+    lag_fun = chosen_weighting_function
+)
+
+GM
+summary.rumidas(GM)
+names(GM)
+print(GM$loglik)
+print(GM$inf_criteria)
+
+```
